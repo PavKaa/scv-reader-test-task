@@ -129,9 +129,11 @@ namespace TestTask.ConsoleView
 				Console.ForegroundColor = ConsoleColor.White;
 			}
 		}
-
-		public static void OnDispose()
+	
+		public static void Dispose()
 		{
+			_timer.Dispose();
+
 			int consoleWidth = Console.BufferWidth;
 
 			Console.Clear();
@@ -155,7 +157,7 @@ namespace TestTask.ConsoleView
 						if (charsRemains > 0)
 						{
 							var message = new string(' ', (charsRemains - 4) / 2) + "прерван";
-						
+
 							sb.Append('|')
 							  .Append(message)
 							  .Append(' ', (charsRemains - message.Length - 2))
@@ -181,13 +183,6 @@ namespace TestTask.ConsoleView
 
 				Console.ForegroundColor = ConsoleColor.White;
 			}
-		}
-	
-		public static void Dispose()
-		{
-			_timer.Dispose();
-
-			OnDispose();
 		}
 	}
 }
