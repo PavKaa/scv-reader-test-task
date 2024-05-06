@@ -3,7 +3,7 @@
 ## Инструкция по запуску
 Необходимо склонировать репозиторий:
 
-`git clone`
+`git clone https://github.com/PavKaa/scv-reader-test-task.git`
 
 Перейти в папку с проектом, ввести команды:
 
