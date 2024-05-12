@@ -7,46 +7,48 @@ using Timer = System.Threading.Timer;
 
 namespace TestTask.ConsoleView
 {
-	internal static class ConsoleViewer
+	internal class ConsoleViewer : IDisposable
 	{
-		private static readonly List<ProcessInfo> _processes = new List<ProcessInfo>();
+		private static readonly Dictionary<Guid, ProcessInfo> _processes = new Dictionary<Guid, ProcessInfo>();
 		private static Timer _timer;
 
-		static ConsoleViewer()
+		public ConsoleViewer() {}
+
+		public void StartDisplayProcesses()
 		{
 			_timer = new Timer(OnProgressTimerElapsed, null, 0, 1000);
 		}
 		
-		public static bool AddProcess(string processName)
+		public Guid? AddProcess(string processName)
 		{
 			lock(_processes)
 			{
-				var process = _processes.Find(process => process.Name == processName);
+				var process = _processes.Where(pair => pair.Value.Name == processName).Select(pair => pair.Value).FirstOrDefault();
 
 				if(process == null)
 				{
+
+					var id = Guid.NewGuid();
+
 					process = new ProcessInfo(processName);
-					_processes.Add(process);
+					_processes.Add(id, process);
 
 					process.Start();
 
-					return true;
+					return id;
 				}
 			}
 
-			return false;
+			return null;
 		}
 
-		public static bool StopProcess(string processName)
+		public bool StopProcess(Guid id)
 		{
 			lock (_processes)
 			{
-				var process = _processes.Find(process => process.Name == processName);
-
-				if (process != null)
+				if (_processes.TryGetValue(id, out var process))
 				{
 					process.Stop();
-
 					return true;
 				}
 			}
@@ -54,16 +56,13 @@ namespace TestTask.ConsoleView
 			return false;
 		}
 
-		public static bool UpdateProcess(string processName, int progress)
+		public bool UpdateProcess(Guid id, int progress)
 		{
 			lock (_processes)
 			{
-				var process = _processes.Find(process => process.Name == processName);
-
-				if (process != null)
+				if (_processes.TryGetValue(id, out var process))
 				{
 					process.Progress = progress;
-
 					return true;
 				}
 			}
@@ -71,7 +70,7 @@ namespace TestTask.ConsoleView
 			return false;
 		}
 
-		private static void OnProgressTimerElapsed(object state)
+		private void OnProgressTimerElapsed(object state)
 		{
 			int consoleWidth = Console.BufferWidth;
 
@@ -84,18 +83,18 @@ namespace TestTask.ConsoleView
 				foreach(var process in _processes)
 				{
 					StringBuilder sb = new StringBuilder();
-					string processName = "Процесс: " + process.Name + " ";
-					string timeStr = string.Format(" {0:f3} сек.", process.Timer.Elapsed.TotalSeconds);
+					string processName = "Процесс: " + process.Value.Name + " ";
+					string timeStr = string.Format(" {0:f3} сек.", process.Value.Timer.Elapsed.TotalSeconds);
 
 					sb.Append(processName);
 
 					var charsRemains = consoleWidth - processName.Length - timeStr.Length;
 
-					if (process.Timer.IsRunning)
+					if (process.Value.Timer.IsRunning)
 					{
-						if (process.Progress != 0 && charsRemains > 0)
+						if (process.Value.Progress != 0 && charsRemains > 0)
 						{
-							var countOfEqualSign = (int)Math.Floor((charsRemains - 3) / 100.0 * process.Progress);
+							var countOfEqualSign = (int)Math.Floor((charsRemains - 3) / 100.0 * process.Value.Progress);
 
 							sb.Append('|')
 							  .Append('=', countOfEqualSign)
@@ -130,7 +129,7 @@ namespace TestTask.ConsoleView
 			}
 		}
 	
-		public static void Dispose()
+		public void Dispose()
 		{
 			_timer.Dispose();
 
@@ -145,14 +144,14 @@ namespace TestTask.ConsoleView
 				foreach (var process in _processes)
 				{
 					StringBuilder sb = new StringBuilder();
-					string processName = "Процесс: " + process.Name + " ";
-					string timeStr = string.Format(" {0:f3} сек.", process.Timer.Elapsed.TotalSeconds);
+					string processName = "Процесс: " + process.Value.Name + " ";
+					string timeStr = string.Format(" {0:f3} сек.", process.Value.Timer.Elapsed.TotalSeconds);
 
 					sb.Append(processName);
 
 					var charsRemains = consoleWidth - processName.Length - timeStr.Length;
 
-					if (process.Timer.IsRunning)
+					if (process.Value.Timer.IsRunning)
 					{
 						if (charsRemains > 0)
 						{
@@ -164,7 +163,7 @@ namespace TestTask.ConsoleView
 							  .Append('|');
 						}
 
-						process.Stop();
+						process.Value.Stop();
 						Console.ForegroundColor = ConsoleColor.Red;
 					}
 					else

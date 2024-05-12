@@ -2,204 +2,244 @@
 using CsvHelper;
 using System.Globalization;
 using TestTask.Entity;
-using System.Timers;
 using TestTask.ConsoleView;
 using Timer = System.Threading.Timer;
+using System.Collections.Concurrent;
+using System.ComponentModel;
+using System.Diagnostics;
 
 namespace TestTask.Processor
 {
 	internal class DataProcessor
 	{
 		private string _filePath;
-		private int _totalLines = 1;
-		private int _processedLines = 0;
-		private bool keepRunning = true;
-		//private List<Exception> exceptions = new List<Exception>();
-		private Timer _progressTimer;
-		
-		public DataProcessor(string filePath)
+		private ConsoleViewer _consoleViewer;
+
+		private long _totalFileSize = 1;
+		private long _processedFileSize = 0;
+
+		private decimal revenue = 0m;
+		private object locker = new object();
+
+		private ConcurrentDictionary<string, long> brandCounts = new ConcurrentDictionary<string, long>();
+		private ConcurrentDictionary<long, long> categoryCounts = new ConcurrentDictionary<long, long>();
+		private ConcurrentDictionary<long, string> categoryCodes = new ConcurrentDictionary<long, string>();
+		private ConcurrentDictionary<long, long> productCounts = new ConcurrentDictionary<long, long>();
+
+		public DataProcessor(string filePath, ConsoleViewer consoleViewer)
 		{
 			_filePath = filePath;
+			_consoleViewer = consoleViewer;
 		}
 
-		private IEnumerable<EventRecord> ReadData()
+		private void ReadData(CancellationToken token)
 		{
-			if(keepRunning)
+			var processId = _consoleViewer.AddProcess("Обработка файла");
+
+			if (processId == null)
 			{
-				using (var reader = new StreamReader(_filePath))
+				return;
+			}
+
+			var progressTimer = StartProgressTimer(processId.Value);
+
+			using (var reader = new StreamReader(_filePath))
+			{
+				var config = new CsvConfiguration(CultureInfo.InvariantCulture)
 				{
-					var config = new CsvConfiguration(CultureInfo.InvariantCulture)
+					BadDataFound = null,
+					MissingFieldFound = null,
+					HasHeaderRecord = true
+				};
+
+				_totalFileSize = new FileInfo(_filePath).Length;
+
+				using (var csv = new CsvReader(reader, config))
+				{
+					List<EventRecord> records = new List<EventRecord>(500);
+
+					while (csv.Read())
 					{
-						BadDataFound = null,
-						MissingFieldFound = null,
-						HasHeaderRecord = true
-					};
-
-					//todo: добавить поиск по id и чему-то подобному(ссылка)
-					ConsoleViewer.AddProcess("Подсчет количества строк в файле");
-
-					_totalLines = File.ReadLines(_filePath).Count();
-
-					ConsoleViewer.StopProcess("Подсчет количества строк в файле");
-
-					using (var csv = new CsvReader(reader, config))
-					{
-						while (csv.Read() && keepRunning)
+						if (token.IsCancellationRequested)
 						{
-							EventRecord record;
+							progressTimer?.Dispose();
+							return;
+						}
 
-							try
-							{
-								record = csv.GetRecord<EventRecord>();
-							}
-							catch (CsvHelperException)
-							{
-								//exceptions.Add(ex);
-								continue;
-							}
-							catch (FileNotFoundException)
-							{
-								break;
-							}
-							catch (Exception)
-							{
-								break;
-							}
+						try
+						{
+							records.Add(csv.GetRecord<EventRecord>());
+						}
+						catch (CsvHelperException)
+						{
+							continue;
+						}
+						catch (Exception)
+						{
+							progressTimer?.Dispose();
+							return;
+						}
 
-							_processedLines++;
+						if (records.Count > 400)
+						{
+							Task dataProcessing = new Task(state => ProcessData(state), new List<EventRecord>(records));
+							dataProcessing.Start();
 
-							yield return record;
+							_processedFileSize = reader.BaseStream.Position;
+
+							//ProcessDataInOneThread(records);
+
+							records.Clear();
 						}
 					}
 				}
 			}
 
-			yield break;
+			_consoleViewer.StopProcess(processId.Value);
+			progressTimer?.Dispose();
 		}
 
-		public EventStatistics? ProcessData()
+		private void ProcessData(object? state)
 		{
-			IEnumerable<EventRecord> eventRecords;
+			if (state is List<EventRecord> events)
+			{
+				var localRevenue = 0m;
+				var localBrandCounts = new Dictionary<string, long>();
+				var localCategoryCounts = new Dictionary<long, long>();
+				var localCategoryCodes = new Dictionary<long, string>();
+				var localProductCounts = new Dictionary<long, long>();
 
-			eventRecords = ReadData();
-
-			var revenue = 0m;
-			var locker = new object();
-
-			var brandCounts = new Dictionary<string, long>();
-			var categoryCounts = new Dictionary<long, long>();
-			var categoryCodes = new Dictionary<long, string>();
-			var productCounts = new Dictionary<long, long>();
-
-			ConsoleViewer.AddProcess("Обработка данных файла");
-			_progressTimer = new Timer(callback: (state) =>
+				foreach (var record in events)
 				{
-					var progress = (int)Math.Floor((double)_processedLines / _totalLines * 100);
+					if (record != null)
+					{
+						if (record.Brand != "")
+						{
+							if (localBrandCounts.ContainsKey(record.Brand))
+							{
+								localBrandCounts[record.Brand]++;
+							}
+							else
+							{
+								localBrandCounts.Add(record.Brand, 1);
+							}
+						}
 
-					ConsoleViewer.UpdateProcess("Обработка данных файла", progress);
+						if (localCategoryCounts.ContainsKey(record.CategoryId))
+						{
+							localCategoryCounts[record.CategoryId]++;
+						}
+						else
+						{
+							localCategoryCounts.Add(record.CategoryId, 1);
+							localCategoryCodes.Add(record.CategoryId, record.CategoryCode ?? "unknown");
+						}
+
+						if (localProductCounts.ContainsKey(record.ProductId))
+						{
+							localProductCounts[record.ProductId]++;
+						}
+						else
+						{
+							localProductCounts.Add(record.ProductId, 1);
+						}
+
+						if (record.EventType == "purchase")
+						{
+							localRevenue += record.Price;
+						}
+					}
+				}
+
+				events.Clear();
+
+				foreach (var pair in localBrandCounts)
+				{
+					brandCounts.AddOrUpdate(pair.Key, pair.Value, (key, value) => value + pair.Value);
+				}
+
+				foreach (var pair in localCategoryCounts)
+				{
+					categoryCounts.AddOrUpdate(pair.Key, pair.Value, (key, value) => value + pair.Value);
+				}
+
+				foreach (var pair in localCategoryCodes)
+				{
+					categoryCodes.GetOrAdd(pair.Key, pair.Value);
+				}
+
+				foreach (var pair in localProductCounts)
+				{
+					productCounts.AddOrUpdate(pair.Key, pair.Value, (key, value) => value + pair.Value);
+				}
+
+				lock (locker)
+				{
+					revenue += localRevenue;
+				}
+			}
+		}
+
+		//void ProcessDataInOneThread(List<EventRecord> records)
+		//{
+		//	foreach (var record in records)
+		//	{
+		//		if (record != null)
+		//		{
+		//			if (record.Brand != "")
+		//			{
+		//				brandCounts.AddOrUpdate(record.Brand, 1, (key, value) => value + 1);
+		//			}
+
+		//			categoryCounts.AddOrUpdate(record.CategoryId, 1, (key, value) => value + 1);
+		//			categoryCodes.GetOrAdd(record.CategoryId, record.CategoryCode ?? "unknown");
+
+		//			productCounts.AddOrUpdate(record.ProductId, 1, (key, value) => value + 1);
+
+		//			if (record.EventType == "purchase")
+		//			{
+		//				revenue += record.Price;
+		//			}
+		//		}
+		//	}
+		//}
+
+		public EventStatistics? ProcessFile(CancellationToken token)
+		{
+			if (_filePath == null || !File.Exists(_filePath))
+			{
+				return null;
+			}
+
+			Task fileReading = new Task(() => ReadData(token), token);
+			fileReading.Start();
+
+			fileReading.Wait();
+
+			var mostPopularCategoryId = categoryCounts.OrderByDescending(item => item.Value).FirstOrDefault().Key;
+
+			return new EventStatistics()
+			{
+				TotalRevenue = revenue,
+				MostPopularBrand = brandCounts.OrderByDescending(item => item.Value).FirstOrDefault().Key,
+				MostPopularCategoryId = mostPopularCategoryId,
+				MostPopularCategoryCode = categoryCodes[mostPopularCategoryId],
+				MostPopularProductId = productCounts.OrderByDescending(item => item.Value).FirstOrDefault().Key
+			};
+		}
+
+		private Timer StartProgressTimer(Guid processId)
+		{
+			return new Timer(callback: (state) =>
+				{
+					var progress = (int)Math.Floor((double)_processedFileSize / _totalFileSize * 100);
+
+					_consoleViewer.UpdateProcess(processId, progress);
 				},
 				null,
 				100,
 				5000
 			);
-
-			new Thread(() =>
-			{
-				while (keepRunning)
-				{
-					if (Console.KeyAvailable)
-					{
-						var key = Console.ReadKey(intercept: true);
-						if (key.Key == ConsoleKey.C)
-						{
-                            keepRunning = false;
-                        }
-					}
-
-					Thread.Sleep(100);
-				}
-			}).Start();
-
-			try
-			{
-				Parallel.ForEach(eventRecords, record =>
-				{
-					if (record == null)
-					{
-						return;
-					}
-
-					if (record.Brand != null)
-					{
-						lock (brandCounts)
-						{
-							if (brandCounts.ContainsKey(record.Brand))
-							{
-								brandCounts[record.Brand]++;
-							}
-							else
-							{
-								brandCounts.Add(record.Brand, 1);
-							}
-						}
-					}
-
-					lock (categoryCounts)
-					{
-						if (categoryCounts.ContainsKey(record.CategoryId))
-						{
-							categoryCounts[record.CategoryId]++;
-						}
-						else
-						{
-							categoryCounts.Add(record.CategoryId, 1);
-
-							lock (categoryCodes)
-							{
-								categoryCodes.Add(record.CategoryId, record.CategoryCode ?? "indefined");
-							}
-						}
-					}
-
-					lock (productCounts)
-					{
-						if (productCounts.ContainsKey(record.ProductId))
-						{
-							productCounts[record.ProductId]++;
-						}
-						else
-						{
-							productCounts.Add(record.ProductId, 1);
-						}
-					}
-
-					if (record.EventType == "purchase")
-					{
-						lock (locker)
-						{
-							revenue += record.Price;
-						}
-					}
-				});
-			}
-			catch (Exception ex)
-			{
-				return null;
-			}
-
-			ConsoleViewer.StopProcess("Обработка данных файла");
-			_progressTimer?.Dispose();
-
-			var mostPopularCategoryId = categoryCounts.OrderBy(item => item.Value).FirstOrDefault().Key;
-
-			return new EventStatistics()
-			{
-				TotalRevenue = revenue,
-				MostPopularBrand = brandCounts.OrderBy(item => item.Value).FirstOrDefault().Key,
-				MostPopularCategoryId = mostPopularCategoryId,
-				MostPopularCategoryCode = categoryCodes[mostPopularCategoryId],
-				MostPopularProductId = productCounts.OrderBy(item => item.Value).FirstOrDefault().Key
-			};
 		}
 	}
 }
